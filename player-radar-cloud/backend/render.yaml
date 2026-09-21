@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: player-radar-cloud
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: player-radar-db
+          property: connectionString
+databases:
+  - name: player-radar-db
+    plan: free
