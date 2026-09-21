@@ -1,0 +1,209 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Player Radar Cloud</title>
+<style>
+body{margin:0;background:#090b10;color:#eee;font-family:system-ui,sans-serif}
+.wrap{max-width:1200px;margin:auto;padding:20px}
+.card{background:#111620;border:1px solid #2a3140;border-radius:14px;padding:16px;margin-bottom:16px}
+.auth{max-width:380px;margin:10vh auto}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,button{box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #394254;background:#0d1118;color:#fff}
+input{width:100%}button{cursor:pointer}button:hover{background:#171d28}.hidden{display:none}
+.grid{display:grid;grid-template-columns:minmax(300px,1fr) 300px;gap:16px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+canvas{width:100%;background:#0d1118;border:1px solid #2a3140;border-radius:50%;display:block}
+.ok{color:#65e6a2}.bad{color:#ff7474}.muted{color:#8d96a8;font-size:13px}
+.target{margin:5px 0}.target button{width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.target button.selected{border-color:#62e6ff;background:#16202b}
+.target .name{font-weight:600}.target .mini{color:#8d96a8;font-size:12px}
+.coords{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.coord{background:#0d1118;border:1px solid #273040;border-radius:9px;padding:9px;text-align:center}
+.coord b{display:block;font-size:16px;margin-top:2px}.coord span{font-size:11px;color:#8d96a8}
+.selected-title{font-size:18px;font-weight:700;margin-bottom:4px}
+</style>
+</head>
+<body>
+<div id="auth" class="card auth">
+  <h1>Player Radar</h1>
+  <p class="muted">Log in to view your Minecraft player's live radar from anywhere.</p>
+  <input id="u" placeholder="Username"><br><br>
+  <input id="p" type="password" placeholder="Password">
+  <div class="row"><button onclick="login()">Log in</button><button onclick="register()">Create account</button></div>
+  <p id="msg" class="bad"></p>
+</div>
+
+<div id="app" class="wrap hidden">
+  <div class="card">
+    <div class="row"><b>Player Radar</b><span id="status" class="muted">Connecting…</span><button onclick="logout()" style="margin-left:auto">Log out</button></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <canvas id="radar" width="620" height="620"></canvas>
+    </div>
+
+    <div>
+      <div class="card">
+        <b>Your Minecraft link</b>
+        <p class="muted">Generate a 6-digit code, then pair it from the Minecraft PC.</p>
+        <button onclick="code()">Generate link code</button>
+        <h2 id="code">—</h2>
+      </div>
+
+      <div class="card">
+        <b>Share your radar</b>
+        <input id="shareUser" placeholder="Friend's username">
+        <button onclick="share()">Share</button>
+        <p class="muted">Friends must have their own account.</p>
+      </div>
+
+      <div class="card">
+        <b>Players / devices</b>
+        <div id="targets"></div>
+      </div>
+
+      <div class="card">
+        <div class="selected-title" id="selectedName">No player selected</div>
+        <div id="selectedStatus" class="muted">Select a player above.</div>
+        <div class="coords">
+          <div class="coord"><span>X</span><b id="sx">—</b></div>
+          <div class="coord"><span>Y</span><b id="sy">—</b></div>
+          <div class="coord"><span>Z</span><b id="sz">—</b></div>
+        </div>
+        <p class="muted" id="selectedExtra">Click a player to focus their live coordinates.</p>
+      </div>
+
+      <div class="card">
+        <b>View</b>
+        <p>Arrow size: <b id="av">5</b></p>
+        <input id="as" type="range" min="1" max="10" value="5" style="width:100%">
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let tok=localStorage.prTok||'',targets=[],selected=null,dataBy={};
+const slider=document.getElementById('as'),av=document.getElementById('av');
+const auth=document.getElementById('auth'),app=document.getElementById('app'),msg=document.getElementById('msg');
+
+async function api(path,opt={}){
+  return fetch(path,{...opt,headers:{...(opt.headers||{}),'Authorization':'Bearer '+tok,'Content-Type':'application/json'}})
+}
+async function login(){
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u.value,password:p.value})});
+  const j=await r.json();
+  if(!r.ok){msg.textContent=j.error;return}
+  tok=j.token;localStorage.prTok=tok;start()
+}
+async function register(){
+  const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u.value,password:p.value})});
+  const j=await r.json();msg.textContent=r.ok?'Account created — log in.':j.error
+}
+function logout(){localStorage.removeItem('prTok');location.reload()}
+
+async function start(){
+  auth.classList.add('hidden');app.classList.remove('hidden');
+  await loadTargets();
+  const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?token='+encodeURIComponent(tok));
+  ws.onopen=()=>status.innerHTML='<span class="ok">Online</span>';
+  ws.onclose=()=>status.innerHTML='<span class="bad">Disconnected</span>';
+  ws.onmessage=e=>{
+    const j=JSON.parse(e.data);
+    if(j.type==='radar'){
+      dataBy[j.ownerId]=j.snapshot;
+      draw();
+    }
+  }
+}
+
+async function loadTargets(){
+  const r=await api('/api/targets');
+  if(!r.ok){logout();return}
+  targets=await r.json();
+  if(!selected&&targets[0])selected=targets[0].id;
+  targets.forEach(t=>{if(t.snapshot)dataBy[t.id]=t.snapshot});
+  renderTargets();draw();
+}
+
+function coordsForPlayer(d,p){
+  if(!d?.self||!p)return null;
+  return {x:d.self.x+p.x,y:d.self.y+p.y,z:d.self.z+p.z,distance:p.distance};
+}
+
+function renderTargets(){
+  const box=document.getElementById('targets');
+  if(!targets.length){box.innerHTML='<p class="muted">No linked players yet.</p>';return}
+  box.innerHTML=targets.map(t=>{
+    const d=dataBy[t.id];
+    const online=!!d?.connected;
+    const label=t.username+(t.mine?' (you)':'');
+    return `<div class="target"><button class="${selected===t.id?'selected':''}" onclick="selectTarget('${t.id}')"><span class="name">${escapeHtml(label)}</span><span class="mini">${online?'ONLINE':'OFFLINE'}</span></button></div>`
+  }).join('');
+}
+
+function selectTarget(id){selected=id;renderTargets();draw()}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+async function code(){
+  const r=await api('/api/link-code',{method:'POST'});const j=await r.json();
+  document.getElementById('code').textContent=r.ok?j.code:j.error
+}
+async function share(){
+  const r=await api('/api/share',{method:'POST',body:JSON.stringify({username:shareUser.value})});
+  alert((await r.json()).error||'Shared!');await loadTargets()
+}
+slider.oninput=()=>{av.textContent=slider.value;draw()};
+
+function updateSelectedDetails(d){
+  const title=document.getElementById('selectedName'),statusEl=document.getElementById('selectedStatus');
+  const sx=document.getElementById('sx'),sy=document.getElementById('sy'),sz=document.getElementById('sz'),extra=document.getElementById('selectedExtra');
+  const target=targets.find(t=>t.id===selected);
+  if(!target){title.textContent='No player selected';statusEl.textContent='Select a player above.';sx.textContent=sy.textContent=sz.textContent='—';return}
+  title.textContent=target.username+(target.mine?' (you)':'');
+  if(!d?.connected){statusEl.textContent='Minecraft is offline or not in a world.';sx.textContent=sy.textContent=sz.textContent='—';extra.textContent='Waiting for live coordinates…';return}
+  statusEl.innerHTML='<span class="ok">Live coordinates</span>';
+  if(target.mine){
+    sx.textContent=Math.round(d.self.x);sy.textContent=Math.round(d.self.y);sz.textContent=Math.round(d.self.z);
+    extra.textContent='Your current Minecraft coordinates.';
+    return;
+  }
+  const p=(d.players||[]).find(x=>x.name===target.username);
+  const c=coordsForPlayer(d,p);
+  if(!c){statusEl.textContent='Player is not currently within the 256-block radar range.';sx.textContent=sy.textContent=sz.textContent='—';extra.textContent='The player may be offline, outside range, or not visible to this client.';return}
+  sx.textContent=Math.round(c.x);sy.textContent=Math.round(c.y);sz.textContent=Math.round(c.z);
+  extra.textContent='Distance: '+c.distance.toFixed(1)+' blocks';
+}
+
+function draw(){
+  renderTargets();
+  const d=dataBy[selected],c=document.getElementById('radar'),ctx=c.getContext('2d'),cx=310,cy=310,R=270;
+  ctx.clearRect(0,0,620,620);
+  ctx.strokeStyle='#273040';ctx.lineWidth=1;
+  for(let i=1;i<=4;i++){ctx.beginPath();ctx.arc(cx,cy,R*i/4,0,Math.PI*2);ctx.stroke()}
+  ctx.beginPath();ctx.moveTo(cx-R,cy);ctx.lineTo(cx+R,cy);ctx.moveTo(cx,cy-R);ctx.lineTo(cx,cy+R);ctx.stroke();
+  ctx.fillStyle='#62e6ff';ctx.beginPath();ctx.arc(cx,cy,7,0,7);ctx.fill();
+  if(!d?.connected){updateSelectedDetails(d);return}
+
+  for(const p of d.players||[]){
+    const x=cx+p.x/256*R,y=cy+p.z/256*R;
+    if(Math.hypot(p.x,p.z)>256)continue;
+    const isSelected=selected&&targets.find(t=>t.id===selected)?.username===p.name;
+    if(isSelected){ctx.beginPath();ctx.arc(x,y,11,0,Math.PI*2);ctx.strokeStyle='#62e6ff';ctx.lineWidth=2;ctx.stroke()}
+    ctx.beginPath();ctx.arc(x,y,isSelected?7:6,0,7);ctx.fillStyle=isSelected?'#62e6ff':'#ff5c70';ctx.fill();
+    ctx.fillStyle='#ddd';ctx.font='12px system-ui';ctx.fillText(p.name,x+9,y+4)
+  }
+
+  const s=Number(slider.value)/5,a=d.self.yaw*Math.PI/180,ax=-Math.sin(a),ay=Math.cos(a),shaft=26*s,tip=34*s,head=6*s;
+  ctx.lineWidth=Math.max(1,3*s);ctx.strokeStyle='#62e6ff';ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+ax*shaft,cy+ay*shaft);ctx.stroke();
+  const tx=cx+ax*tip,ty=cy+ay*tip,px=-ay,py=ax;ctx.fillStyle='#62e6ff';ctx.beginPath();ctx.moveTo(tx,ty);ctx.lineTo(tx-ax*head+px*head,ty-ay*head+py*head);ctx.lineTo(tx-ax*head-px*head,ty-ay*head-py*head);ctx.fill();
+  updateSelectedDetails(d);
+}
+
+if(tok)start();
+</script>
+</body>
+</html>
